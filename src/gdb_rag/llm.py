@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from typing import Iterator
+
 import requests
 
 _SYSTEM = (
@@ -25,3 +28,34 @@ def generate_answer(question: str, chunks: list[str], model: str) -> str:
     )
     response.raise_for_status()
     return response.json()["message"]["content"]
+
+
+def generate_answer_stream(question: str, chunks: list[str], model: str) -> Iterator[str]:
+    context = "\n\n---\n\n".join(chunks)
+    response = requests.post(
+        "http://localhost:11434/api/chat",
+        json={
+            "model": model,
+            "stream": True,
+            "messages": [
+                {"role": "system", "content": _SYSTEM},
+                {"role": "user", "content": f"GDB Manual excerpts:\n\n{context}\n\nQuestion: {question}"},
+            ],
+        },
+        stream=True,
+        timeout=120,
+    )
+    response.raise_for_status()
+
+    for raw_line in response.iter_lines():
+        if not raw_line:
+            continue
+        try:
+            data = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        token = data.get("message", {}).get("content", "")
+        if token:
+            yield token
+        if data.get("done", False):
+            break

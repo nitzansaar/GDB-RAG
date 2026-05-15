@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GDB Assistant</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; display: flex; flex-direction: column; height: 100dvh; }
+    #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+    .turn { display: flex; flex-direction: column; gap: 4px; }
+    .label { font-size: 0.75rem; color: #888; }
+    .text { white-space: pre-wrap; line-height: 1.6; }
+    .turn.user .text { color: #000; }
+    .turn.assistant .text { color: #222; }
+    details { margin-top: 6px; font-size: 0.8rem; color: #555; }
+    details summary { cursor: pointer; }
+    details a { color: #0066cc; }
+    #form { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #ddd; }
+    #q { flex: 1; padding: 8px; font: inherit; border: 1px solid #ccc; border-radius: 4px; resize: none; }
+    #q:focus { outline: none; border-color: #888; }
+    button { padding: 8px 16px; font: inherit; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .error { color: red; }
+  </style>
+</head>
+<body>
+  <div id="chat"></div>
+  <form id="form">
+    <textarea id="q" rows="2" placeholder="Ask a GDB question…"></textarea>
+    <button id="btn" type="submit">Send</button>
+  </form>
+  <script>
+    const chat = document.getElementById('chat');
+    const form = document.getElementById('form');
+    const q    = document.getElementById('q');
+    const btn  = document.getElementById('btn');
+
+    q.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+    });
+
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      const question = q.value.trim();
+      if (!question) return;
+      q.value = '';
+      setLoading(true);
+
+      addTurn('user', question);
+      const { textEl, detailsEl } = addAssistantTurn();
+
+      try {
+        await stream(question, textEl, detailsEl);
+      } catch (err) {
+        textEl.classList.add('error');
+        textEl.textContent = 'Error: ' + err.message;
+      } finally {
+        setLoading(false);
+      }
+    });
+
+    async function stream(question, textEl, detailsEl) {
+      const res = await fetch('/api/ask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question }),
+      });
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}));
+        throw new Error(b.error || 'HTTP ' + res.status);
+      }
+
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const { events, rest } = parseSSE(buf);
+        buf = rest;
+        for (const { event, data } of events) {
+          if (event === 'token') {
+            textEl.textContent += data.text;
+          } else if (event === 'sources') {
+            renderSources(data, detailsEl);
+          } else if (event === 'error') {
+            textEl.classList.add('error');
+            textEl.textContent = data.message;
+          }
+        }
+        chat.scrollTop = chat.scrollHeight;
+      }
+    }
+
+    function parseSSE(buf) {
+      const events = [];
+      const blocks = buf.split('\n\n');
+      const rest = blocks.pop();
+      for (const block of blocks) {
+        if (!block.trim()) continue;
+        let event = 'message', data = '';
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event: ')) event = line.slice(7);
+          else if (line.startsWith('data: ')) data = line.slice(6);
+        }
+        try { events.push({ event, data: JSON.parse(data) }); } catch {}
+      }
+      return { events, rest };
+    }
+
+    function renderSources(sources, detailsEl) {
+      if (!sources || !sources.length) return;
+      const summary = document.createElement('summary');
+      summary.textContent = `Sources (${sources.length})`;
+      detailsEl.appendChild(summary);
+      for (const s of sources) {
+        const p = document.createElement('p');
+        const title = esc(s.page_title || 'GDB Manual');
+        p.innerHTML = s.url
+          ? `<a href="${esc(s.url)}" target="_blank">${title}</a>`
+          : title;
+        if (s.heading_path) p.innerHTML += ` — ${esc(s.heading_path)}`;
+        detailsEl.appendChild(p);
+      }
+    }
+
+    function addTurn(role, text) {
+      const div = document.createElement('div');
+      div.className = 'turn ' + role;
+      const label = document.createElement('div');
+      label.className = 'label';
+      label.textContent = role === 'user' ? 'You' : 'GDB';
+      const textEl = document.createElement('div');
+      textEl.className = 'text';
+      textEl.textContent = text;
+      div.appendChild(label);
+      div.appendChild(textEl);
+      chat.appendChild(div);
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    function addAssistantTurn() {
+      const div = document.createElement('div');
+      div.className = 'turn assistant';
+      const label = document.createElement('div');
+      label.className = 'label';
+      label.textContent = 'GDB';
+      const textEl = document.createElement('div');
+      textEl.className = 'text';
+      const detailsEl = document.createElement('details');
+      div.appendChild(label);
+      div.appendChild(textEl);
+      div.appendChild(detailsEl);
+      chat.appendChild(div);
+      return { textEl, detailsEl };
+    }
+
+    function setLoading(on) { btn.disabled = on; q.disabled = on; }
+
+    function esc(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+  </script>
+</body>
+</html>

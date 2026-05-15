@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "beautifulsoup4",
+  "flask",
   "chromadb",
   "requests",
   "sentence-transformers",

@@ -102,6 +102,14 @@ def stats(args: argparse.Namespace) -> None:
     print(f"Chunks file: {settings.chunks_path}")
 
 
+def serve(args: argparse.Namespace) -> None:
+    from gdb_rag.server import app  # noqa: PLC0415
+    host = args.host
+    port = args.port
+    print(f"Starting GDB RAG server on http://{host}:{port}")
+    app.run(host=host, port=port, debug=args.debug, threaded=True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build and query a GDB manual vector database.")
     parser.add_argument("--data-dir", default=None, help="Directory for generated raw/chroma data.")
@@ -135,6 +143,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     stats_parser = subparsers.add_parser("stats", help="Show ChromaDB collection stats.")
     stats_parser.set_defaults(func=stats)
+
+    serve_parser = subparsers.add_parser("serve", help="Start the web chatbot server.")
+    serve_parser.add_argument("--host", default="127.0.0.1")
+    serve_parser.add_argument("--port", type=int, default=5000)
+    serve_parser.add_argument("--debug", action="store_true")
+    serve_parser.set_defaults(func=serve)
 
     return parser
 
