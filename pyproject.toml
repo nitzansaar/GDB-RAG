@@ -13,10 +13,10 @@ dependencies = [
   "flask",
   "groq",
   "gunicorn",
+  "openai",
   "rank-bm25",
   "chromadb",
   "requests",
-  "sentence-transformers",
   "tqdm",
 ]
 

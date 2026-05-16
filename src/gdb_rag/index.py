@@ -1,36 +1,42 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import threading
 from pathlib import Path
 from typing import Any, Iterable
 
 import chromadb
+import openai
 from chromadb.errors import NotFoundError
 from chromadb.api.models.Collection import Collection
 from rank_bm25 import BM25Okapi
-from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
 from gdb_rag.chunker import Chunk
 from gdb_rag.config import Settings
 
-_BGE_MODELS = frozenset({
-    "BAAI/bge-small-en-v1.5",
-    "BAAI/bge-base-en-v1.5",
-    "BAAI/bge-large-en-v1.5",
-})
-
 _bm25_cache: dict[str, tuple[BM25Okapi, list[str]]] = {}
 _bm25_lock = threading.Lock()
 
-_model_cache: dict[str, SentenceTransformer] = {}
-_model_lock = threading.Lock()
-
 _chroma_clients: dict[str, chromadb.PersistentClient] = {}
 _chroma_lock = threading.Lock()
+
+_openai_client: openai.OpenAI | None = None
+_openai_lock = threading.Lock()
+
+
+def _get_openai_client() -> openai.OpenAI:
+    global _openai_client
+    with _openai_lock:
+        if _openai_client is None:
+            _openai_client = openai.OpenAI()
+        return _openai_client
+
+
+def embed_texts(texts: list[str], model: str) -> list[list[float]]:
+    response = _get_openai_client().embeddings.create(input=texts, model=model)
+    return [item.embedding for item in response.data]
 
 
 def batch(items: list[Any], size: int) -> Iterable[list[Any]]:
@@ -49,26 +55,6 @@ def sanitize_metadata(metadata: dict[str, Any]) -> dict[str, str | int | float |
             sanitized[key] = str(value)
     return sanitized
 
-
-def configure_model_cache(settings: Settings) -> None:
-    settings.model_cache_dir.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("HF_HOME", str(settings.model_cache_dir))
-    os.environ.setdefault("HF_HUB_CACHE", str(settings.model_cache_dir / "hub"))
-    os.environ.setdefault("HF_XET_CACHE", str(settings.model_cache_dir / "xet"))
-    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
-
-
-def load_embedding_model(settings: Settings, local_files_only: bool = False) -> SentenceTransformer:
-    configure_model_cache(settings)
-    key = settings.embedding_model
-    with _model_lock:
-        if key not in _model_cache:
-            _model_cache[key] = SentenceTransformer(
-                settings.embedding_model,
-                cache_folder=str(settings.model_cache_dir),
-                local_files_only=local_files_only,
-            )
-        return _model_cache[key]
 
 
 def save_chunks(chunks: list[Chunk], path: Path) -> None:
@@ -166,11 +152,6 @@ def load_bm25_index(settings: Settings) -> tuple[BM25Okapi, list[str]]:
         return _bm25_cache[cache_key]
 
 
-def _apply_query_prefix(question: str, settings: Settings) -> str:
-    if settings.embedding_model in _BGE_MODELS:
-        return settings.bge_query_prefix + question
-    return question
-
 
 def _reciprocal_rank_fusion(ranked_lists: list[list[str]], k: int = 60) -> list[tuple[str, float]]:
     scores: dict[str, float] = {}
@@ -186,12 +167,11 @@ def build_index(
     reset: bool = False,
     batch_size: int = 64,
 ) -> Collection:
-    model = load_embedding_model(settings)
     collection = get_collection(settings, reset=reset)
 
     for chunk_batch in tqdm(list(batch(chunks, batch_size)), desc="Embedding chunks", unit="batch"):
         documents = [chunk.text for chunk in chunk_batch]
-        embeddings = model.encode(documents, normalize_embeddings=True).tolist()
+        embeddings = embed_texts(documents, settings.embedding_model)
         collection.upsert(
             ids=[chunk.id for chunk in chunk_batch],
             documents=documents,
@@ -210,10 +190,8 @@ def query_index(
 ) -> dict[str, Any]:
     overfetch = top_k * 4
 
-    model = load_embedding_model(settings, local_files_only=False)
     collection = get_collection(settings, reset=False)
-    prefixed = _apply_query_prefix(question, settings)
-    embedding = model.encode([prefixed], normalize_embeddings=True).tolist()[0]
+    embedding = embed_texts([question], settings.embedding_model)[0]
 
     vector_results = collection.query(
         query_embeddings=[embedding],
