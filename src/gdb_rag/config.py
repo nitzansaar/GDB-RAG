@@ -1,7 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
+
+
+def _default_data_dir() -> Path:
+    return Path(os.environ.get("DATA_DIR", "data"))
 
 
 @dataclass(frozen=True)
@@ -16,7 +21,7 @@ class Settings:
     llm_model: str = "llama-3.1-8b-instant"
     top_k: int = 3
     user_agent: str = "gdb-rag-ingester/0.1"
-    data_dir: Path = Path("data")
+    data_dir: Path = field(default_factory=_default_data_dir)
 
     @property
     def raw_dir(self) -> Path:

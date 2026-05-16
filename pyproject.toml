@@ -12,6 +12,7 @@ dependencies = [
   "beautifulsoup4",
   "flask",
   "groq",
+  "gunicorn",
   "rank-bm25",
   "chromadb",
   "requests",
