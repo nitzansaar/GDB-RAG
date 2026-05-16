@@ -83,8 +83,8 @@ def query(args: argparse.Namespace) -> None:
 
 def ask(args: argparse.Namespace) -> None:
     settings = settings_from_args(args)
-    model = args.model or settings.ollama_model
-    results = query_index(args.question, settings=settings, top_k=args.top_k)
+    model = args.model or settings.llm_model
+    results = query_index(args.question, settings=settings, top_k=args.top_k or settings.top_k)
     chunks = results.get("documents", [[]])[0]
     if not chunks:
         print("No relevant chunks found.")
@@ -137,7 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ask_parser = subparsers.add_parser("ask", help="Ask a question; retrieves chunks and generates an LLM answer.")
     ask_parser.add_argument("question", help="Question to answer using the GDB manual.")
-    ask_parser.add_argument("--top-k", type=int, default=5, help="Number of chunks to retrieve.")
+    ask_parser.add_argument("--top-k", type=int, default=None, help="Number of chunks to retrieve.")
     ask_parser.add_argument("--model", default=None, help="Ollama model name (default: llama3.2).")
     ask_parser.set_defaults(func=ask)
 

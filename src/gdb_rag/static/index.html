@@ -67,7 +67,7 @@
       const res = await fetch('/api/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question, history: history.slice(-10) }),
+        body: JSON.stringify({ question, history: history.slice(0, -1).slice(-10) }),
       });
       if (!res.ok) {
         const b = await res.json().catch(() => ({}));
@@ -78,6 +78,7 @@
       const dec = new TextDecoder();
       let buf = '';
       let answer = null;
+      let sources = [];
 
       while (true) {
         const { done, value } = await reader.read();
@@ -89,6 +90,7 @@
           if (event === 'token') {
             textEl.textContent += data.text;
           } else if (event === 'sources') {
+            sources = data;
             renderSources(data, detailsEl);
           } else if (event === 'error') {
             textEl.classList.add('error');
@@ -118,6 +120,13 @@
       return { events, rest };
     }
 
+    function isSafeUrl(url) {
+      try {
+        const u = new URL(url, window.location.href);
+        return u.protocol === 'https:' || u.protocol === 'http:';
+      } catch { return false; }
+    }
+
     function renderSources(sources, detailsEl) {
       if (!sources || !sources.length) return;
       const summary = document.createElement('summary');
@@ -125,11 +134,20 @@
       detailsEl.appendChild(summary);
       for (const s of sources) {
         const p = document.createElement('p');
-        const title = esc(s.page_title || 'GDB Manual');
-        p.innerHTML = s.url
-          ? `<a href="${esc(s.url)}" target="_blank">${title}</a>`
-          : title;
-        if (s.heading_path) p.innerHTML += ` — ${esc(s.heading_path)}`;
+        const title = s.page_title || 'GDB Manual';
+        if (s.url && isSafeUrl(s.url)) {
+          const a = document.createElement('a');
+          a.href = s.url;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.textContent = title;
+          p.appendChild(a);
+        } else {
+          p.textContent = title;
+        }
+        if (s.heading_path) {
+          p.appendChild(document.createTextNode(' \u2014 ' + s.heading_path));
+        }
         detailsEl.appendChild(p);
       }
     }

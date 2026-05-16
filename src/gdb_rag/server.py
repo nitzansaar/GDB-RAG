@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import requests as http_requests
+import groq as groq_lib
 from flask import Flask, Response, request, send_from_directory, stream_with_context
 
 from gdb_rag.config import DEFAULT_SETTINGS
@@ -28,9 +28,12 @@ def ask() -> Response:
     if not question:
         return Response(json.dumps({"error": "question is required"}), status=400, mimetype="application/json")
 
-    model = body.get("model") or DEFAULT_SETTINGS.ollama_model
-    top_k = int(body.get("top_k") or 5)
-    history = body.get("history") or []
+    model = body.get("model") or DEFAULT_SETTINGS.llm_model
+    try:
+        top_k = max(1, int(body.get("top_k") or DEFAULT_SETTINGS.top_k))
+    except (ValueError, TypeError):
+        return Response(json.dumps({"error": "top_k must be an integer"}), status=400, mimetype="application/json")
+    history = _validate_history(body.get("history"))
 
     def event_stream():
         try:
@@ -63,11 +66,14 @@ def ask() -> Response:
             for token in generate_answer_stream(question, documents, model=model, history=history):
                 full_answer.append(token)
                 yield _sse("token", {"text": token})
-        except http_requests.ConnectionError:
-            yield _sse("error", {"message": "Cannot reach Ollama at localhost:11434. Is it running?"})
+        except groq_lib.AuthenticationError:
+            yield _sse("error", {"message": "Invalid GROQ_API_KEY. Check your environment variable."})
             return
-        except http_requests.HTTPError as exc:
-            yield _sse("error", {"message": f"Ollama error: {exc.response.status_code}"})
+        except groq_lib.RateLimitError:
+            yield _sse("error", {"message": "Groq rate limit reached. Try again in a moment."})
+            return
+        except groq_lib.APIConnectionError:
+            yield _sse("error", {"message": "Could not connect to Groq API."})
             return
         except Exception as exc:
             yield _sse("error", {"message": f"LLM error: {exc}"})
@@ -84,3 +90,18 @@ def ask() -> Response:
 
 def _sse(event: str, data) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _validate_history(raw) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    result = []
+    for entry in raw:
+        if (
+            isinstance(entry, dict)
+            and entry.get("role") in ("user", "assistant")
+            and isinstance(entry.get("content"), str)
+            and len(entry["content"]) <= 4000
+        ):
+            result.append({"role": entry["role"], "content": entry["content"]})
+    return result

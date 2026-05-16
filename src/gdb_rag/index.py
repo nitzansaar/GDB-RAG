@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import pickle
 import re
 import threading
 from pathlib import Path
@@ -26,6 +25,12 @@ _BGE_MODELS = frozenset({
 
 _bm25_cache: dict[str, tuple[BM25Okapi, list[str]]] = {}
 _bm25_lock = threading.Lock()
+
+_model_cache: dict[str, SentenceTransformer] = {}
+_model_lock = threading.Lock()
+
+_chroma_clients: dict[str, chromadb.PersistentClient] = {}
+_chroma_lock = threading.Lock()
 
 
 def batch(items: list[Any], size: int) -> Iterable[list[Any]]:
@@ -55,11 +60,15 @@ def configure_model_cache(settings: Settings) -> None:
 
 def load_embedding_model(settings: Settings, local_files_only: bool = False) -> SentenceTransformer:
     configure_model_cache(settings)
-    return SentenceTransformer(
-        settings.embedding_model,
-        cache_folder=str(settings.model_cache_dir),
-        local_files_only=local_files_only,
-    )
+    key = settings.embedding_model
+    with _model_lock:
+        if key not in _model_cache:
+            _model_cache[key] = SentenceTransformer(
+                settings.embedding_model,
+                cache_folder=str(settings.model_cache_dir),
+                local_files_only=local_files_only,
+            )
+        return _model_cache[key]
 
 
 def save_chunks(chunks: list[Chunk], path: Path) -> None:
@@ -81,9 +90,17 @@ def load_chunks(path: Path) -> list[Chunk]:
     return chunks
 
 
+def _get_chroma_client(settings: Settings) -> chromadb.PersistentClient:
+    key = str(settings.chroma_dir)
+    with _chroma_lock:
+        if key not in _chroma_clients:
+            settings.chroma_dir.mkdir(parents=True, exist_ok=True)
+            _chroma_clients[key] = chromadb.PersistentClient(path=str(settings.chroma_dir))
+        return _chroma_clients[key]
+
+
 def get_collection(settings: Settings, reset: bool = False) -> Collection:
-    settings.chroma_dir.mkdir(parents=True, exist_ok=True)
-    client = chromadb.PersistentClient(path=str(settings.chroma_dir))
+    client = _get_chroma_client(settings)
     if reset:
         try:
             client.delete_collection(settings.collection_name)
@@ -99,13 +116,41 @@ def tokenize_for_bm25(text: str) -> list[str]:
     return [t for t in re.findall(r"[a-z][a-z0-9_]*", text.lower()) if len(t) > 1]
 
 
+def _serialize_bm25(bm25: BM25Okapi) -> dict:
+    return {
+        "k1": bm25.k1,
+        "b": bm25.b,
+        "epsilon": bm25.epsilon,
+        "corpus_size": bm25.corpus_size,
+        "avgdl": bm25.avgdl,
+        "doc_freqs": bm25.doc_freqs,
+        "idf": bm25.idf,
+        "doc_len": bm25.doc_len,
+    }
+
+
+def _deserialize_bm25(data: dict) -> BM25Okapi:
+    bm25: BM25Okapi = object.__new__(BM25Okapi)
+    bm25.k1 = data["k1"]
+    bm25.b = data["b"]
+    bm25.epsilon = data["epsilon"]
+    bm25.corpus_size = data["corpus_size"]
+    bm25.avgdl = data["avgdl"]
+    bm25.doc_freqs = data["doc_freqs"]
+    bm25.idf = data["idf"]
+    bm25.doc_len = data["doc_len"]
+    bm25.tokenizer = None
+    return bm25
+
+
 def build_bm25_index(chunks: list[Chunk], settings: Settings) -> None:
     tokenized = [tokenize_for_bm25(chunk.text) for chunk in chunks]
     bm25 = BM25Okapi(tokenized)
     chunk_ids = [chunk.id for chunk in chunks]
     settings.bm25_path.parent.mkdir(parents=True, exist_ok=True)
-    with settings.bm25_path.open("wb") as f:
-        pickle.dump({"bm25": bm25, "chunk_ids": chunk_ids}, f)
+    payload = {"bm25": _serialize_bm25(bm25), "chunk_ids": chunk_ids}
+    with settings.bm25_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f)
     cache_key = str(settings.bm25_path)
     with _bm25_lock:
         _bm25_cache.pop(cache_key, None)
@@ -115,9 +160,9 @@ def load_bm25_index(settings: Settings) -> tuple[BM25Okapi, list[str]]:
     cache_key = str(settings.bm25_path)
     with _bm25_lock:
         if cache_key not in _bm25_cache:
-            with settings.bm25_path.open("rb") as f:
-                payload = pickle.load(f)
-            _bm25_cache[cache_key] = (payload["bm25"], payload["chunk_ids"])
+            with settings.bm25_path.open(encoding="utf-8") as f:
+                payload = json.load(f)
+            _bm25_cache[cache_key] = (_deserialize_bm25(payload["bm25"]), payload["chunk_ids"])
         return _bm25_cache[cache_key]
 
 

@@ -13,7 +13,8 @@ class Settings:
     chunk_token_limit: int = 900
     chunk_overlap: int = 120
     request_timeout: int = 30
-    ollama_model: str = "llama3.2"
+    llm_model: str = "llama-3.1-8b-instant"
+    top_k: int = 3
     user_agent: str = "gdb-rag-ingester/0.1"
     data_dir: Path = Path("data")
 
@@ -35,7 +36,7 @@ class Settings:
 
     @property
     def bm25_path(self) -> Path:
-        return self.data_dir / "bm25_index.pkl"
+        return self.data_dir / "bm25_index.json"
 
 
 DEFAULT_SETTINGS = Settings()

@@ -1,33 +1,38 @@
 from __future__ import annotations
 
-import json
 from typing import Iterator
 
-import requests
+from groq import Groq
 
 _SYSTEM = (
-    "You are a GDB debugger expert. Answer the user's question using only the "
-    "provided GDB manual excerpts. Be concise and precise. "
-    "If the answer is not covered by the excerpts, say so explicitly."
+    "You are a GDB manual assistant. Answer questions using the excerpts provided as your source.\n\n"
+    "- Lead with a clear, direct explanation. Do not quote raw fragments or echo the question back.\n"
+    "- Synthesize the excerpts into a coherent answer in your own words.\n"
+    "- If the excerpts don't contain enough information to answer, say so in one sentence.\n"
+    "- If the question is not about GDB, decline in one sentence."
 )
 
 
-def generate_answer(question: str, chunks: list[str], model: str) -> str:
+def _build_messages(question: str, chunks: list[str], history: list[dict] | None) -> list[dict]:
     context = "\n\n---\n\n".join(chunks)
-    response = requests.post(
-        "http://localhost:11434/api/chat",
-        json={
-            "model": model,
-            "stream": False,
-            "messages": [
-                {"role": "system", "content": _SYSTEM},
-                {"role": "user", "content": f"GDB Manual excerpts:\n\n{context}\n\nQuestion: {question}"},
-            ],
-        },
-        timeout=120,
+    messages = [{"role": "system", "content": _SYSTEM}]
+    if history:
+        messages.extend(history[-10:])
+    messages.append({
+        "role": "user",
+        "content": f"GDB Manual excerpts:\n\n{context}\n\nQuestion: {question}",
+    })
+    return messages
+
+
+def generate_answer(question: str, chunks: list[str], model: str) -> str:
+    client = Groq()
+    response = client.chat.completions.create(
+        model=model,
+        messages=_build_messages(question, chunks, None),
+        temperature=0.2,
     )
-    response.raise_for_status()
-    return response.json()["message"]["content"]
+    return response.choices[0].message.content
 
 
 def generate_answer_stream(
@@ -36,32 +41,14 @@ def generate_answer_stream(
     model: str,
     history: list[dict] | None = None,
 ) -> Iterator[str]:
-    context = "\n\n---\n\n".join(chunks)
-    messages = [{"role": "system", "content": _SYSTEM}]
-    if history:
-        messages.extend(history[-10:])  # cap at last 5 exchanges
-    messages.append({"role": "user", "content": f"GDB Manual excerpts:\n\n{context}\n\nQuestion: {question}"})
-    response = requests.post(
-        "http://localhost:11434/api/chat",
-        json={
-            "model": model,
-            "stream": True,
-            "messages": messages,
-        },
+    client = Groq()
+    stream = client.chat.completions.create(
+        model=model,
+        messages=_build_messages(question, chunks, history),
         stream=True,
-        timeout=120,
+        temperature=0.2,
     )
-    response.raise_for_status()
-
-    for raw_line in response.iter_lines():
-        if not raw_line:
-            continue
-        try:
-            data = json.loads(raw_line)
-        except json.JSONDecodeError:
-            continue
-        token = data.get("message", {}).get("content", "")
+    for chunk in stream:
+        token = chunk.choices[0].delta.content or ""
         if token:
             yield token
-        if data.get("done", False):
-            break

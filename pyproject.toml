@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = [
   "beautifulsoup4",
   "flask",
+  "groq",
   "rank-bm25",
   "chromadb",
   "requests",
