@@ -33,7 +33,8 @@ class Settings:
 
     @property
     def model_cache_dir(self) -> Path:
-        return self.data_dir / "models"
+        override = os.environ.get("MODEL_CACHE_DIR")
+        return Path(override) if override else self.data_dir / "models"
 
     @property
     def chunks_path(self) -> Path:

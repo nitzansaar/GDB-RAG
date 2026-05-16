@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -e .
 
 ENV DATA_DIR=/data
 ENV PORT=8080
-ENV HF_HOME=/app/model_cache
+ENV MODEL_CACHE_DIR=/app/model_cache
 
 RUN python - <<'EOF'
 from sentence_transformers import SentenceTransformer
