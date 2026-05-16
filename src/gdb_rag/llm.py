@@ -30,17 +30,23 @@ def generate_answer(question: str, chunks: list[str], model: str) -> str:
     return response.json()["message"]["content"]
 
 
-def generate_answer_stream(question: str, chunks: list[str], model: str) -> Iterator[str]:
+def generate_answer_stream(
+    question: str,
+    chunks: list[str],
+    model: str,
+    history: list[dict] | None = None,
+) -> Iterator[str]:
     context = "\n\n---\n\n".join(chunks)
+    messages = [{"role": "system", "content": _SYSTEM}]
+    if history:
+        messages.extend(history[-10:])  # cap at last 5 exchanges
+    messages.append({"role": "user", "content": f"GDB Manual excerpts:\n\n{context}\n\nQuestion: {question}"})
     response = requests.post(
         "http://localhost:11434/api/chat",
         json={
             "model": model,
             "stream": True,
-            "messages": [
-                {"role": "system", "content": _SYSTEM},
-                {"role": "user", "content": f"GDB Manual excerpts:\n\n{context}\n\nQuestion: {question}"},
-            ],
+            "messages": messages,
         },
         stream=True,
         timeout=120,

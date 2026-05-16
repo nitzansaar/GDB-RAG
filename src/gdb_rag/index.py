@@ -2,17 +2,30 @@ from __future__ import annotations
 
 import json
 import os
+import pickle
+import re
+import threading
 from pathlib import Path
 from typing import Any, Iterable
 
 import chromadb
 from chromadb.errors import NotFoundError
 from chromadb.api.models.Collection import Collection
+from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
 from gdb_rag.chunker import Chunk
 from gdb_rag.config import Settings
+
+_BGE_MODELS = frozenset({
+    "BAAI/bge-small-en-v1.5",
+    "BAAI/bge-base-en-v1.5",
+    "BAAI/bge-large-en-v1.5",
+})
+
+_bm25_cache: dict[str, tuple[BM25Okapi, list[str]]] = {}
+_bm25_lock = threading.Lock()
 
 
 def batch(items: list[Any], size: int) -> Iterable[list[Any]]:
@@ -64,13 +77,7 @@ def load_chunks(path: Path) -> list[Chunk]:
             if not line.strip():
                 continue
             record = json.loads(line)
-            chunks.append(
-                Chunk(
-                    id=record["id"],
-                    text=record["text"],
-                    metadata=record["metadata"],
-                )
-            )
+            chunks.append(Chunk(id=record["id"], text=record["text"], metadata=record["metadata"]))
     return chunks
 
 
@@ -86,6 +93,46 @@ def get_collection(settings: Settings, reset: bool = False) -> Collection:
         name=settings.collection_name,
         metadata={"hnsw:space": "cosine", "source": settings.source_url},
     )
+
+
+def tokenize_for_bm25(text: str) -> list[str]:
+    return [t for t in re.findall(r"[a-z][a-z0-9_]*", text.lower()) if len(t) > 1]
+
+
+def build_bm25_index(chunks: list[Chunk], settings: Settings) -> None:
+    tokenized = [tokenize_for_bm25(chunk.text) for chunk in chunks]
+    bm25 = BM25Okapi(tokenized)
+    chunk_ids = [chunk.id for chunk in chunks]
+    settings.bm25_path.parent.mkdir(parents=True, exist_ok=True)
+    with settings.bm25_path.open("wb") as f:
+        pickle.dump({"bm25": bm25, "chunk_ids": chunk_ids}, f)
+    cache_key = str(settings.bm25_path)
+    with _bm25_lock:
+        _bm25_cache.pop(cache_key, None)
+
+
+def load_bm25_index(settings: Settings) -> tuple[BM25Okapi, list[str]]:
+    cache_key = str(settings.bm25_path)
+    with _bm25_lock:
+        if cache_key not in _bm25_cache:
+            with settings.bm25_path.open("rb") as f:
+                payload = pickle.load(f)
+            _bm25_cache[cache_key] = (payload["bm25"], payload["chunk_ids"])
+        return _bm25_cache[cache_key]
+
+
+def _apply_query_prefix(question: str, settings: Settings) -> str:
+    if settings.embedding_model in _BGE_MODELS:
+        return settings.bge_query_prefix + question
+    return question
+
+
+def _reciprocal_rank_fusion(ranked_lists: list[list[str]], k: int = 60) -> list[tuple[str, float]]:
+    scores: dict[str, float] = {}
+    for ranked in ranked_lists:
+        for rank, doc_id in enumerate(ranked, start=1):
+            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank)
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
 
 def build_index(
@@ -106,6 +153,8 @@ def build_index(
             embeddings=embeddings,
             metadatas=[sanitize_metadata(chunk.metadata) for chunk in chunk_batch],
         )
+
+    build_bm25_index(chunks, settings)
     return collection
 
 
@@ -114,11 +163,44 @@ def query_index(
     settings: Settings,
     top_k: int = 5,
 ) -> dict[str, Any]:
+    overfetch = top_k * 4
+
     model = load_embedding_model(settings, local_files_only=True)
     collection = get_collection(settings, reset=False)
-    embedding = model.encode([question], normalize_embeddings=True).tolist()[0]
-    return collection.query(
+    prefixed = _apply_query_prefix(question, settings)
+    embedding = model.encode([prefixed], normalize_embeddings=True).tolist()[0]
+
+    vector_results = collection.query(
         query_embeddings=[embedding],
-        n_results=top_k,
+        n_results=overfetch,
         include=["documents", "metadatas", "distances"],
     )
+    vector_ids: list[str] = vector_results["ids"][0]
+    id_to_doc: dict[str, str] = dict(zip(vector_ids, vector_results["documents"][0]))
+    id_to_meta: dict[str, dict] = dict(zip(vector_ids, vector_results["metadatas"][0]))
+    id_to_dist: dict[str, float] = dict(zip(vector_ids, vector_results["distances"][0]))
+
+    bm25, bm25_chunk_ids = load_bm25_index(settings)
+    query_tokens = tokenize_for_bm25(question)
+    bm25_scores = bm25.get_scores(query_tokens).tolist()
+    bm25_top_ids = [
+        cid for cid, _ in sorted(zip(bm25_chunk_ids, bm25_scores), key=lambda x: x[1], reverse=True)[:overfetch]
+    ]
+
+    fused = _reciprocal_rank_fusion([vector_ids, bm25_top_ids])
+    top_ids = [doc_id for doc_id, _ in fused[:top_k]]
+
+    missing = [cid for cid in top_ids if cid not in id_to_doc]
+    if missing:
+        got = collection.get(ids=missing, include=["documents", "metadatas"])
+        for cid, doc, meta in zip(got["ids"], got["documents"] or [], got["metadatas"] or []):
+            id_to_doc[cid] = doc
+            id_to_meta[cid] = meta
+            id_to_dist[cid] = 0.0
+
+    return {
+        "ids": [top_ids],
+        "documents": [[id_to_doc.get(cid, "") for cid in top_ids]],
+        "metadatas": [[id_to_meta.get(cid, {}) for cid in top_ids]],
+        "distances": [[id_to_dist.get(cid, 0.0) for cid in top_ids]],
+    }

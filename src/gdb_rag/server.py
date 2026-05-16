@@ -30,6 +30,7 @@ def ask() -> Response:
 
     model = body.get("model") or DEFAULT_SETTINGS.ollama_model
     top_k = int(body.get("top_k") or 5)
+    history = body.get("history") or []
 
     def event_stream():
         try:
@@ -58,7 +59,9 @@ def ask() -> Response:
         yield _sse("sources", sources)
 
         try:
-            for token in generate_answer_stream(question, documents, model=model):
+            full_answer = []
+            for token in generate_answer_stream(question, documents, model=model, history=history):
+                full_answer.append(token)
                 yield _sse("token", {"text": token})
         except http_requests.ConnectionError:
             yield _sse("error", {"message": "Cannot reach Ollama at localhost:11434. Is it running?"})
@@ -70,7 +73,7 @@ def ask() -> Response:
             yield _sse("error", {"message": f"LLM error: {exc}"})
             return
 
-        yield _sse("done", {})
+        yield _sse("done", {"answer": "".join(full_answer)})
 
     return Response(
         stream_with_context(event_stream()),
