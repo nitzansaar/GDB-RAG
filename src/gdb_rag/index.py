@@ -210,7 +210,7 @@ def query_index(
 ) -> dict[str, Any]:
     overfetch = top_k * 4
 
-    model = load_embedding_model(settings, local_files_only=True)
+    model = load_embedding_model(settings, local_files_only=False)
     collection = get_collection(settings, reset=False)
     prefixed = _apply_query_prefix(question, settings)
     embedding = model.encode([prefixed], normalize_embeddings=True).tolist()[0]
