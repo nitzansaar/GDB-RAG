@@ -17,7 +17,7 @@ ENV MODEL_CACHE_DIR=/app/model_cache
 
 RUN python - <<'EOF'
 from sentence_transformers import SentenceTransformer
-SentenceTransformer("BAAI/bge-base-en-v1.5", cache_folder="/app/model_cache")
+SentenceTransformer("BAAI/bge-small-en-v1.5", cache_folder="/app/model_cache")
 EOF
 
 COPY start.sh .

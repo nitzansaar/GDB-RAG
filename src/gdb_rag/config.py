@@ -13,7 +13,7 @@ def _default_data_dir() -> Path:
 class Settings:
     source_url: str = "https://sourceware.org/gdb/current/onlinedocs/gdb.html/#SEC_Contents"
     collection_name: str = "gdb_manual"
-    embedding_model: str = "BAAI/bge-base-en-v1.5"
+    embedding_model: str = "BAAI/bge-small-en-v1.5"
     bge_query_prefix: str = "Represent this sentence for searching relevant passages: "
     chunk_token_limit: int = 900
     chunk_overlap: int = 120
