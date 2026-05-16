@@ -2,9 +2,8 @@
 set -e
 
 if [ ! -f "$DATA_DIR/bm25_index.json" ]; then
-    echo "==> Index not found. Running ingest (takes ~10 min on first deploy)..."
-    gdb-rag ingest --reset
-    echo "==> Ingest complete."
+    echo "==> Index not found. Starting background ingest..."
+    gdb-rag ingest --reset &
 fi
 
 exec gunicorn \
